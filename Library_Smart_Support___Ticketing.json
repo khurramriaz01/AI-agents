@@ -1,0 +1,706 @@
+{
+  "name": "Library Smart Support & Ticketing",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMonth"
+            }
+          ]
+        },
+        "filters": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -120,
+        320
+      ],
+      "id": "9bb204a3-7007-4451-af79-06180af8ff53",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "eqOkUuKgtV4r9mHO",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate unique ticket ID\nconst now = new Date();\nconst timestamp = now.getTime();\nconst dateStr = now.toISOString().split('T')[0].replace(/-/g, '');\nconst randomNum = Math.floor(Math.random() * 1000).toString().padStart(3, '0');\nconst ticketId = `LIB-${dateStr}-${randomNum}`;\n\n// Extract email details\nconst emailData = $input.first().json;\n\n// Extract email and name from the \"From\" field\nconst fromField = emailData.From || emailData.from || 'unknown@email.com';\nlet customerEmail = 'unknown@email.com';\nlet customerName = 'Unknown';\n\n// Parse email format: \"Name <email@domain.com>\" or just \"email@domain.com\"\nif (fromField.includes('<') && fromField.includes('>')) {\n  // Format: \"Khurram Riaz <khurramriazf23@nutech.edu.pk>\"\n  const nameMatch = fromField.match(/^(.+?)\\s*</);\n  const emailMatch = fromField.match(/<(.+?)>/);\n  \n  customerName = nameMatch ? nameMatch[1].trim() : 'Unknown';\n  customerEmail = emailMatch ? emailMatch[1].trim() : 'unknown@email.com';\n} else {\n  // Format: just email address\n  customerEmail = fromField.trim();\n  // Extract name from email prefix\n  customerName = customerEmail.split('@')[0].replace(/[._]/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());\n}\n\n// Extract other email details\nconst subject = emailData.Subject || emailData.subject || 'No Subject';\nconst body = emailData.snippet || emailData.bodyHtml || emailData.bodyPlain || emailData.body || 'No content';\nconst receivedDate = emailData.internalDate ? new Date(parseInt(emailData.internalDate)).toISOString() : new Date().toISOString();\n\nreturn [{\n  json: {\n    ticketId: ticketId,\n    customerName: customerName,\n    customerEmail: customerEmail,\n    subject: subject,\n    body: body,\n    receivedDate: receivedDate,\n    status: 'New',\n    priority: 'Medium',\n    assignedTeam: 'Unassigned',\n    createdAt: now.toISOString(),\n    lastUpdated: now.toISOString(),\n    gmailId: emailData.id\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        320
+      ],
+      "id": "7cf0e717-837e-4e9b-b0c7-ed4e616afe65",
+      "name": "Generate Ticket"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash-preview-04-17",
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        280,
+        520
+      ],
+      "id": "52db1773-c1ec-4ba6-b05b-f0429a680e51",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "wgk3pkLwZViKtuSi",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "let result = $json; // This is the output from the AI Ticket Analyzer\n\n// Handle nested output structure that some AI agents might produce (e.g., {\"output\": {\"json\": {...}}})\nif (result.output && typeof result.output === 'object') {\n  if (result.output.json && typeof result.output.json === 'object') {\n    result = result.output.json;\n  } else if (typeof result.output === 'object') {\n    result = result.output;\n  }\n}\n\n// Get original ticket data from the 'Generate Ticket' node\nconst ticketData = $('Generate Ticket').first().json; // Ensure this node name matches your workflow\n\n// Validate AI results and apply fallbacks\nconst validatedResult = {\n  // Category must be one of the two new teams. Default to \"Online Team\" if AI categorizes incorrectly.\n  category: result.category === \"Online Team\" || result.category === \"Offline Team\" ? result.category : \"Online Team\",\n  priority: result.priority || \"Medium\",\n  tags: Array.isArray(result.tags) ? result.tags : [\"general\", \"escalated\"],\n  estimated_resolution_time: result.estimated_resolution_time || \"4 hours\",\n  auto_response: result.auto_response || `Dear Patron,\\n\\nThank you for contacting our library. We have received your inquiry and will respond within 24 hours.\\n\\nBest regards,\\nLibrary Support Team`,\n  internal_notes: result.internal_notes || \"No additional notes from AI for escalation.\",\n  requires_followup: typeof result.requires_followup === 'boolean' ? result.requires_followup : true, // Default to true for escalated tickets\n  suggested_actions: Array.isArray(result.suggested_actions) ? result.suggested_actions : [\"Review inquiry\", \"Contact patron\"]\n};\n\n// Merge original ticket data with the validated AI analysis\nconst enhancedTicket = {\n  ...ticketData, // Includes customerName, customerEmail, ticketId, subject, body\n  ...validatedResult, // Includes category, priority, tags, auto_response etc.\n  assignedTeam: validatedResult.category, // Assigns the ticket to the determined team\n  status: \"Open\", // Ticket is now open for human intervention\n  lastUpdated: new Date().toISOString(), // Timestamp of when the ticket was processed\n  resolution_type: \"Forwarded to Human Support\" // Crucial field for Google Sheet tracking\n};\n\nreturn [{\n  json: enhancedTicket\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        460
+      ],
+      "id": "baea8a73-40e5-4317-a963-821f2d6403e0",
+      "name": "Process Analysis"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1eB4ITBq0dPVKXCN_JD5pnDj-1G0KBcEi1CZfAq4fIZc",
+          "mode": "list",
+          "cachedResultName": "n8n",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1eB4ITBq0dPVKXCN_JD5pnDj-1G0KBcEi1CZfAq4fIZc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1eB4ITBq0dPVKXCN_JD5pnDj-1G0KBcEi1CZfAq4fIZc/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "ticketId",
+              "displayName": "ticketId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "customerName",
+              "displayName": "customerName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "customerEmail",
+              "displayName": "customerEmail",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "body",
+              "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "receivedDate",
+              "displayName": "receivedDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "assignedTeam",
+              "displayName": "assignedTeam",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "createdAt",
+              "displayName": "createdAt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lastUpdated",
+              "displayName": "lastUpdated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "gmailId",
+              "displayName": "gmailId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tags",
+              "displayName": "tags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "estimated_resolution_time",
+              "displayName": "estimated_resolution_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "auto_response",
+              "displayName": "auto_response",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "internal_notes",
+              "displayName": "internal_notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "requires_followup",
+              "displayName": "requires_followup",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "suggested_actions",
+              "displayName": "suggested_actions",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "resolution_type",
+              "displayName": "resolution_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2360,
+        320
+      ],
+      "id": "074126c7-396d-4019-b5cb-eb17e6e09dfe",
+      "name": "Log to Google Sheets",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "3EolNEobNQqZJRUc",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Generate Ticket').item.json.ticketId }}{{ $('Generate Ticket').item.json.customerName }}{{ $('Generate Ticket').item.json.customerEmail }}{{ $('Generate Ticket').item.json.subject }}{{ $('Generate Ticket').item.json.body }}",
+        "options": {
+          "systemMessage": "You are a professional AI assistant for a library ticketing system. Analyze the patron inquiry and provide a comprehensive response.\n\nCustomer Details:\n- Name: {{ $json.customerName }}\n- Email: {{ $json.customerEmail }}\n- Ticket ID: {{ $json.ticketId }}\n- Subject: {{ $json.subject }}\n\nInquiry: {{ $json.body }}\n\nAnalyze this inquiry and categorize it based on the content:\n\n**TEAMS:**\n- \"Online Team\" - for queries related to the library's website, online catalog, digital resources (eBooks, audiobooks, e-magazines, online databases), online accounts (password changes, login issues, online registration), library apps, streaming services, and any virtual library services.\n- \"Offline Team\" - for queries related to the physical library building, in-person services (borrowing/returning physical items, holds on physical items, physical card applications, study rooms, printing/scanning in the building), physical collections, in-person events, facilities (Wi-Fi in building, parking), fines for physical items, and general inquiries about the physical library's operations.\n\n**PRIORITY LEVELS:**\n- \"High\" - system outages, urgent research deadlines, access issues affecting multiple users\n- \"Medium\" - account problems, specific book requests, moderate technical issues\n- \"Low\" - general questions, policy inquiries, non-urgent requests\n\n**SLA RESPONSE TIMES:**\n- High: 2 hours\n- Medium: 4 hours  \n- Low: 24 hours\n\nProvide a JSON response with these exact fields:\n{\n  \"category\": \"[team name]\",\n  \"priority\": \"[High/Medium/Low]\",\n  \"tags\": [\"tag1\", \"tag2\"],\n  \"estimated_resolution_time\": \"[time estimate]\",\n  \"auto_response\": \"[professional response to customer]\",\n  \"internal_notes\": \"[notes for staff]\",\n  \"requires_followup\": true/false,\n  \"suggested_actions\": [\"action1\", \"action2\"]\n}\n\nMake the auto_response professional, empathetic, and include:\n1. Acknowledgment with ticket ID\n2. Expected response timeframe\n3. Next steps or immediate help if applicable\n4. Professional closing\n\nExample auto_response format:\n\"Dear [Name],\\n\\nThank you for contacting our library support team. We have received your inquiry regarding [brief description] and created ticket #[ID] for tracking.\\n\\nOur [Team] team will review your request and respond within [timeframe]. [Any immediate guidance if applicable]\\n\\nIf you have any urgent questions, please don't hesitate to contact us.\\n\\nBest regards,\\nLibrary Support Team\""
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [
+        1060,
+        460
+      ],
+      "id": "336a75ee-92a7-4209-b894-145e0eefc623",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.body }}",
+        "options": {
+          "systemMessage": " Your goal is to determine if the customer's inquiry can be answered *directly and completely* by one of the provided FAQs.\n\n **IF a clear and direct match is found:**\n 1. Set \"faq_matched\" to true.\n 2. Provide the \"faq_answer\" clearly and professionally based on the relevant FAQ.\n 3. Keep \"internal_notes\" concise, e.g., \"Answered by FAQ: [FAQ Title]\".\n\n **IF no clear and direct match is found, or the query is complex, requires account access, or is outside the scope of FAQs:**\n 1. Set \"faq_matched\" to false.\n 2. Leave \"faq_answer\" as an empty string.\n 3. Set \"internal_notes\" to \"FAQ bot could not find a suitable match. Escalating for human review.\"\n\n **Customer Inquiry:** {{ $json.body }}\n\n ---\n **Available FAQs (for your reference and to generate 'faq_answer'):**\n\n **Online-Related Queries:**\n 1.  **Q: How do I reset my library account password online?**\n     A: You can reset your password by visiting our website's login page and clicking \"Forgot Password.\" Enter your library card number or email, and follow the instructions sent to your registered email address.\n 2.  **Q: I can't log into my library account on the website. What should I do?**\n     A: Please ensure you are using the correct library card number or username and password. If you've forgotten your password, use the \"Forgot Password\" link. If issues persist after resetting, your account might be locked or expired; please contact us directly.\n 3.  **Q: How can I borrow an eBook from the library?**\n     A: To borrow an eBook, visit our digital collection portal (e.g., OverDrive/Libby) linked from our website. You'll need your library card number to sign in, then you can browse and borrow titles.\n 4.  **Q: What app is best for reading library eBooks on my tablet/smartphone?**\n     A: We recommend the Libby app by OverDrive for an optimal experience with our eBooks and audiobooks. It's available for free on iOS and Android app stores.\n 5.  **Q: My eBook isn't downloading correctly. Can you help me troubleshoot?**\n     A: Please ensure your device is connected to the internet and you have sufficient storage. Try restarting the app or device. If the problem persists, check our digital troubleshooting guide on the website, or contact us with details about your device and the error message.\n 6.  **Q: How many digital items (eBooks, audiobooks, magazines) can I check out at one time?**\n     A: Patrons can typically check out up to [X, e.g., 10] digital items simultaneously. Check our digital borrowing policy page for the most current limits.\n 7.  **Q: Do you offer online streaming services for movies or music?**\n     A: Yes, we offer [e.g., Kanopy for movies, Freegal for music] accessible with your library card. You can find links and instructions on our website's digital resources section.\n 8.  **Q: How do I renew my borrowed items online?**\n     A: You can renew eligible items by logging into your library account on our website, navigating to \"My Account\" or \"Checked Out Items,\" and selecting the \"Renew\" option next to the item.\n 9.  **Q: Can I place a hold on a physical book using the online catalog?**\n     A: Yes, you can place a hold on physical books through our online catalog. Search for the book, click \"Place Hold,\" and log in with your library card.\n 10. **Q: How do I update my contact information (email/phone) for my online account?**\n     A: For security reasons, changes to contact information typically require in-person verification or a direct request to staff. Please contact us via phone or visit the library.\n 11. **Q: My library card number isn't recognized when I try to sign up for an online service.**\n     A: Please double-check your card number for typos. If it still doesn't work, your card might be expired or need re-registration. Contact us to verify your card status.\n 12. **Q: Are there any online resources or databases for learning a new language or skill?**\n     A: Absolutely! We offer various online learning platforms like [e.g., Rosetta Stone, LinkedIn Learning, Gale Courses]. Visit our \"Online Learning\" section on the website for access and details.\n 13. **Q: How can I view my past online borrowing history?**\n     A: You can usually view your past borrowing history by logging into your online library account and checking the \"My Account\" or \"History\" section. Note that this feature might need to be enabled in your account settings.\n 14. **Q: What are the compatibility requirements for accessing your digital databases (e.g., specific browsers, operating systems)?**\n     A: Most of our digital databases are compatible with modern web browsers (Chrome, Firefox, Edge, Safari) and common operating systems (Windows, macOS, iOS, Android). Specific requirements may vary by database; check the individual database's help section.\n 15. **Q: The library website seems to be down or very slow. Is there a known issue?**\n     A: Please try clearing your browser's cache and cookies or using a different browser. If the issue persists, there might be a temporary system outage. Check our social media or contact us for real-time updates.\n\n **Offline-Related Queries (Physical Library):**\n 1.  **Q: What are the library's operating hours and days?**\n     A: Our current operating hours are [e.g., Monday-Thursday: 9 AM - 8 PM, Friday-Saturday: 9 AM - 5 PM, Sunday: Closed]. Please check our website for holiday hours or special closures.\n 2.  **Q: Where is the physical library located, and what are the directions?**\n     A: Our main branch is located at [Your Library Address, e.g., 123 Main Street, Anytown, USA]. You can find directions on our website's \"Contact Us\" page or via Google Maps.\n 3.  **Q: How do I apply for a new library card? What documents do I need?**\n     A: To apply for a new library card, please visit the library in person with a valid photo ID and proof of address (e.g., utility bill). Minors require a parent/guardian.\n 4.  **Q: What is the maximum number of physical books/DVDs/CDs I can check out at once?**\n     A: You can typically check out up to [X, e.g., 50] physical items, with specific limits for different material types (e.g., [Y, e.g., 10] DVDs). Please inquire at the circulation desk for specifics.\n 5.  **Q: Do you have a book drop-off for returns when the library is closed?**\n     A: Yes, we have an outdoor book drop located [e.g., near the main entrance/parking lot] available 24/7 for returns when the library is closed.\n 6.  **Q: Are there public computers available for use, and do they have internet access?**\n     A: Yes, we have public computers with internet access available for patrons. They are usually available on a first-come, first-served basis, or you can reserve a time slot.\n 7.  **Q: Can I print or scan documents at the library, and what are the associated costs?**\n     A: Yes, printing and scanning services are available. Printing costs [e.g., $0.10 per page for black & white, $0.50 for color]. Scanning is typically free.\n 8.  **Q: What are the fines for overdue physical books or media?**\n     A: Our library is [e.g., fine-free for most materials / charges $0.25 per day per item for overdue materials]. Please check our policy page or inquire at the circulation desk for details.\n 9.  **Q: I've lost my library card. How can I get a replacement?**\n     A: You can get a replacement card by visiting the library in person with a valid ID. A small fee of [e.g., $2.00] may apply for replacement cards.\n 10. **Q: Can I reserve a study room or meeting space at the library?**\n     A: Yes, study rooms and meeting spaces are available for reservation. Please visit our website's \"Reservations\" page or inquire at the front desk for availability and booking.\n 11. **Q: Is Wi-Fi available throughout the library building for personal devices?**\n     A: Yes, free public Wi-Fi is available throughout the library building. Look for the \"LibraryGuest\" network and accept the terms of service to connect.\n 12. **Q: How do I find a specific physical book on the shelves if I know the title?**\n     A: You can use our public access computers or your phone to search the online catalog for the book's call number and location (e.g., \"Adult Fiction,\" \"Biography\"). Our staff can also assist you.\n 13. **Q: Are there any upcoming in-person events or workshops for adults/children?**\n     A: We host a variety of events! Check our online events calendar on the library website or pick up a printed calendar at the front desk for upcoming workshops, story times, and programs.\n 14. **Q: Do you offer services like passport applications, notary services, or tax assistance?**\n     A: We offer [mention specific services if applicable, e.g., notary services by appointment]. Please check our website or call us directly for the availability of specialized services like passport applications or tax help.\n 15. **Q: Is there accessible parking available for patrons with disabilities?**\n     A: Yes, designated accessible parking spaces are available directly in front of our main entrance for patrons with disabilities.\n\n **Output format MUST be JSON:**\n ```json\n {\n   \"faq_matched\": true/false,\n   \"faq_answer\": \"[Relevant FAQ answer or empty string]\",\n   \"internal_notes\": \"[Notes about FAQ match or escalation reason]\"\n }\n ```"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [
+        280,
+        320
+      ],
+      "id": "ed0b1a4d-6a82-4630-96f3-acb0cabefb6d",
+      "name": "FAQ response"
+    },
+    {
+      "parameters": {
+        "jsCode": "let aiRawOutput = $json.output; // Correctly reference the 'output' field from the previous node\n\nlet parsedJson = {};\nlet contentToParse = '';\n\n// Check if aiRawOutput is a string (which is what your screenshot suggests)\nif (typeof aiRawOutput === 'string') {\n    // Attempt to extract the actual JSON object string from the raw output.\n    // This regex looks for a string that starts with '{' and ends with '}'\n    // and captures everything in between. It's robust against prefixes like \"json\\n\"\n    // and other potential garbage before/after the JSON.\n    const jsonMatch = aiRawOutput.match(/\\{[\\s\\S]*\\}/);\n\n    if (jsonMatch && jsonMatch[0]) {\n        contentToParse = jsonMatch[0]; // This is the potential JSON string (e.g., \"{...}\")\n    } else {\n        // If no {..} structure found, maybe it's just the plain JSON string without wrapping (less likely for AI outputs)\n        contentToParse = aiRawOutput;\n    }\n\n    try {\n        parsedJson = JSON.parse(contentToParse);\n    } catch (e) {\n        console.error(\"Failed to parse extracted AI output as JSON:\", e);\n        // Fallback if parsing fails. Include part of the raw content for debugging.\n        parsedJson = {\n            faq_matched: false,\n            faq_answer: \"\",\n            internal_notes: `Parsing failed: AI output was not valid JSON. Raw content snippet: ${contentToParse.substring(0, 200)}...`\n        };\n    }\n} else if (typeof aiRawOutput === 'object' && aiRawOutput !== null) {\n    // If the AI Agent node already parsed it into an object (e.g., if AI was configured differently), use it directly\n    parsedJson = aiRawOutput;\n} else {\n    // Default fallback if aiRawOutput is null, undefined, or other unexpected non-string type\n    parsedJson = {\n        faq_matched: false,\n        faq_answer: \"\",\n        internal_notes: \"AI output was empty or an unexpected format (not string or object).\"\n    };\n}\n\n\n// Ensure the final output fields are present and correctly typed for downstream nodes\nconst validatedFaqOutput = {\n    faq_matched: typeof parsedJson.faq_matched === 'boolean' ? parsedJson.faq_matched : false,\n    faq_answer: typeof parsedJson.faq_answer === 'string' ? parsedJson.faq_answer : \"\",\n    internal_notes: typeof parsedJson.internal_notes === 'string' ? parsedJson.internal_notes : \"No internal notes from FAQ AI.\"\n};\n\n// Return the validated data for the next node (Decision: FAQ Matched?)\nreturn [{ json: validatedFaqOutput }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        320
+      ],
+      "id": "a8b1b761-d196-4795-8a34-1ac97d791217",
+      "name": "Parse FAQ AI Response"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3d330355-18cc-47e9-9531-a110253db435",
+              "leftValue": "={{ $json.faq_matched }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {
+          "ignoreCase": false
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        320
+      ],
+      "id": "1910031c-61ff-4407-a36c-57a291a388aa",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "const faqResult = $json; // This contains { faq_matched, faq_answer, internal_notes } from the previous node\nconst ticketData = $('Generate Ticket').first().json; // This gets the original ticket details\n\n// Construct the professional auto-response for the customer\nconst autoResponse = `Dear ${ticketData.customerName},\\n\\nThank you for contacting our library support team. We've received your inquiry regarding \"${ticketData.subject}\" (Ticket ID: ${ticketData.ticketId}).\\n\\n${faqResult.faq_answer}\\n\\nWe hope this answers your question. If you need further assistance, please reply to this email, and our team will be happy to help.\\n\\nBest regards,\\nLibrary Support Team`;\n\n// Combine internal notes\nconst internalNotes = `FAQ bot successfully matched and answered the query: \"${faqResult.internal_notes}\".`;\n\n// Create the enhanced ticket object with all necessary fields for Google Sheets and email\nconst enhancedTicket = {\n  ...ticketData, // Spread operator to include all original ticket details\n  category: \"AI Response\", // A special category for AI-resolved tickets\n  priority: \"Low\", // FAQ responses are generally low urgency for human teams\n  tags: [\"faq\", \"ai-handled\", \"self-service\"],\n  estimated_resolution_time: \"Instant\", // Or \"0 hours\"\n  auto_response: autoResponse, // The full response to send to the customer\n  internal_notes: internalNotes, // Notes for internal logging\n  requires_followup: false, // No human follow-up is needed as AI handled it\n  suggested_actions: [\"Send FAQ Answer\", \"Log AI Response\", \"Mark as Resolved\"],\n  resolution_type: \"AI Responded (FAQ)\", // Crucial for tracking in Google Sheets\n  assignedTeam: \"AI\", // Indicates it was handled by the AI system itself\n  status: \"Closed (AI)\", // Marks the ticket as closed because the AI resolved it\n  lastUpdated: new Date().toISOString() // Timestamp of when the ticket was processed\n};\n\nreturn [{\n  json: enhancedTicket\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ],
+      "id": "35eb7c11-0025-4e8a-8c7c-b73854740eb2",
+      "name": "Prepare FAQ Response"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash-preview-05-20",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        1060,
+        720
+      ],
+      "id": "347f9766-ecd7-4f64-a09f-36bb57aeb463",
+      "name": "Google Gemini Chat Model1",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "wgk3pkLwZViKtuSi",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.customerEmail }}",
+        "subject": "=Your Library Inquiry - Ticket ID:  {{ $json.ticketId }}",
+        "message": "={{ $json.auto_response }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1840,
+        40
+      ],
+      "id": "acd464f5-95f3-4181-bd15-24068fb2eaa7",
+      "name": "Send FAQ response",
+      "webhookId": "722154ca-8501-4c6a-921c-78beb116bae4",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "eqOkUuKgtV4r9mHO",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.customerEmail }}",
+        "subject": "Your Library Support Request - Ticket #{{ $json.ticketId }}",
+        "message": "={{ $json.auto_response }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1840,
+        620
+      ],
+      "id": "31880753-3ada-4384-8217-79d199f7d114",
+      "name": "Send Acknowledgment Response",
+      "webhookId": "cc6f5666-f41f-44ca-bdf0-34dd1bc57105",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "eqOkUuKgtV4r9mHO",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        2120,
+        320
+      ],
+      "id": "3904827e-56a2-49f4-9bd8-6f79b9e694be",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1580,
+        200
+      ],
+      "id": "2de274eb-f51e-459a-b297-84615aa564e4",
+      "name": "Pass Enhanced Ticket (FAQ)"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1620,
+        460
+      ],
+      "id": "5fcee997-7fa2-4b88-addc-57c25df0888b",
+      "name": "Pass Enhanced Ticket (Escalation)"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Generate Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Ticket": {
+      "main": [
+        [
+          {
+            "node": "FAQ response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "FAQ response",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Analysis": {
+      "main": [
+        [
+          {
+            "node": "Pass Enhanced Ticket (Escalation)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FAQ response": {
+      "main": [
+        [
+          {
+            "node": "Parse FAQ AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse FAQ AI Response": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Prepare FAQ Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare FAQ Response": {
+      "main": [
+        [
+          {
+            "node": "Pass Enhanced Ticket (FAQ)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Process Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Enhanced Ticket (FAQ)": {
+      "main": [
+        [
+          {
+            "node": "Send FAQ response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Enhanced Ticket (Escalation)": {
+      "main": [
+        [
+          {
+            "node": "Send Acknowledgment Response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Send FAQ response": {
+      "main": [
+        []
+      ]
+    },
+    "Send Acknowledgment Response": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "cdebfc6e-6b44-4519-95ca-35fbd4d9021c",
+  "meta": {
+    "instanceId": "3b69f7cfc398ce70dafe493e8cf0eb7b7a69b56d3e91fd3cc64f3704b03e5667"
+  },
+  "id": "YuZ9YJnAXDlP6O2r",
+  "tags": []
+}
